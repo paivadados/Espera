@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestão de Espera Unimed - Banco de Dados Ativo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, onSnapshot, deleteDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Configurações fornecidas pelo ambiente
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'unimed-gestao-espera';
+
+        // Estado Global
+        let entries = [];
+        let currentUser = null;
+
+        // 1. Autenticação (Regra 3)
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Erro na autenticação:", error);
+            }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                setupRealtimeListener();
+            }
+        });
+
+        initAuth();
+
+        // 2. Escuta de Dados em Tempo Real (Regra 1 e 2)
+        function setupRealtimeListener() {
+            // Usando caminho obrigatório: /artifacts/{appId}/public/data/{collection}
+            const dataCollection = collection(db, 'artifacts', appId, 'public', 'data', 'atendimentos');
+            
+            // onSnapshot com tratamento de erro obrigatório
+            onSnapshot(dataCollection, (snapshot) => {
+                entries = [];
+                snapshot.forEach(doc => {
+                    entries.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // Ordenação manual em memória (Regra 2)
+                entries.sort((a, b) => b.timestamp - a.timestamp);
+                
+                renderAll();
+            }, (error) => {
+                console.error("Erro ao ler dados:", error);
+            });
+        }
+
+        // 3. Funções de Interface (Globais para os botões do HTML)
+        window.registrarAtendimento = async (e) => {
+            e.preventDefault();
+            if (!currentUser) return;
+
+            const tokenT = new Date(document.getElementById('token-time').value);
+            const callT = new Date(document.getElementById('call-time').value);
+            const colab = document.getElementById('collaborator-name').value || '-';
+            const waitMin = Math.max(0, Math.floor((callT - tokenT) / 60000));
+
+            const newEntry = {
+                queue: document.getElementById('queue-id').value,
+                ticket: document.getElementById('ticket-id').value,
+                colab: colab,
+                tTime: document.getElementById('token-time').value,
+                cTime: document.getElementById('call-time').value,
+                wait: waitMin,
+                timestamp: Date.now(),
+                userId: currentUser.uid
+            };
+
+            try {
+                const dataCollection = collection(db, 'artifacts', appId, 'public', 'data', 'atendimentos');
+                await addDoc(dataCollection, newEntry);
+                
+                // Limpar campos
+                document.getElementById('queue-id').value = '';
+                document.getElementById('ticket-id').value = '';
+                localStorage.setItem('last_colab_v3', colab);
+                setupInputs();
+            } catch (error) {
+                console.error("Erro ao salvar:", error);
+            }
+        };
+
+        window.removeEntry = async (docId) => {
+            if (!currentUser) return;
+            try {
+                const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'atendimentos', docId);
+                await deleteDoc(docRef);
+            } catch (error) {
+                console.error("Erro ao excluir:", error);
+            }
+        };
+
+        // UI Helpers
+        window.renderAll = () => {
+            const body = document.getElementById('log-body');
+            if(!body) return;
+            body.innerHTML = '';
+            
+            entries.forEach(e => {
+                const tr = document.createElement('tr');
+                tr.className = "hover:bg-gray-50 transition-colors group";
+                const waitColor = e.wait > 20 ? 'text-red-600 bg-red-50' : (e.wait > 10 ? 'text-orange-600 bg-orange-50' : 'text-green-600 bg-green-50');
+                
+                tr.innerHTML = `
+                    <td class="px-6 py-4 font-bold text-gray-700">#${e.queue}</td>
+                    <td class="px-6 py-4 font-semibold text-gray-600">${e.ticket}</td>
+                    <td class="px-6 py-4 font-bold text-gray-400 text-[10px] uppercase">${e.colab}</td>
+                    <td class="px-6 py-4 text-xs font-mono text-gray-500">${new Date(e.tTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td>
+                    <td class="px-6 py-4 text-xs font-mono text-gray-500">${new Date(e.cTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</td>
+                    <td class="px-6 py-4 text-center">
+                        <span class="px-3 py-1 rounded-full font-black text-[10px] ${waitColor}">${e.wait} MIN</span>
+                    </td>
+                    <td class="px-6 py-4 text-right">
+                        <button onclick="removeEntry('${e.id}')" class="text-gray-300 hover:text-red-500 transition-colors">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </td>
+                `;
+                body.appendChild(tr);
+            });
+
+            updateStats();
+            updateChart();
+        };
+
+        // Re-vinculando funções de relatório que dependem de entries
+        window.getEntries = () => entries;
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Segoe+UI:wght@400;600;700&display=swap');
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .bg-unimed { background-color: #00995d; }
+        .text-unimed { color: #00995d; }
+        .border-unimed { border-color: #00995d; }
+        .card-shadow { box-shadow: 0 4px 20px rgba(0,0,0,0.06); }
+        #report-modal { display: none; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen pb-10">
+
+    <!-- Modal de Envio -->
+    <div id="report-modal" class="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl max-w-2xl w-full shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div class="bg-unimed p-4 text-white flex justify-between items-center">
+                <h3 class="font-bold flex items-center gap-2">Enviar Relatório para Adriana</h3>
+                <button onclick="closeReportModal()" class="hover:bg-black/10 rounded-full p-1 transition-colors">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 overflow-y-auto flex-1">
+                <textarea id="report-preview" readonly class="w-full h-64 bg-gray-50 border border-gray-200 rounded-lg p-3 font-mono text-xs text-gray-700"></textarea>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-3 mt-6">
+                    <button onclick="triggerMailto()" class="p-4 bg-blue-50 border border-blue-200 rounded-xl text-[10px] font-black text-blue-800">1. ABRIR OUTLOOK</button>
+                    <button onclick="copyReportText()" class="p-4 bg-green-50 border border-green-200 rounded-xl text-[10px] font-black text-green-800">2. COPIAR TEXTO</button>
+                    <button onclick="downloadReportTxt()" class="p-4 bg-gray-50 border border-gray-200 rounded-xl text-[10px] font-black text-gray-800">3. BAIXAR TXT</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Header -->
+    <header class="bg-unimed text-white shadow-md p-3 sticky top-0 z-50">
+        <div class="container mx-auto flex justify-between items-center">
+            <h1 class="text-sm font-bold uppercase tracking-wider">Gestão de Espera | Banco de Dados Conectado</h1>
+            <div class="flex items-center gap-2">
+                <button onclick="openReportModal()" class="bg-white text-unimed text-[10px] font-black py-1.5 px-4 rounded-full uppercase">ENVIAR ADRIANA</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="container mx-auto p-4 space-y-6">
+        <form onsubmit="registrarAtendimento(event)" class="space-y-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <section class="bg-white rounded-xl card-shadow p-5 border-t-4 border-blue-500">
+                    <h2 class="text-xs font-black text-blue-600 mb-4 uppercase">CHAMADOR</h2>
+                    <input type="number" id="queue-id" required class="w-full border-2 border-gray-100 rounded-lg p-2.5 mb-4" placeholder="Nº Chamador">
+                    <input type="datetime-local" id="token-time" required class="w-full border-2 border-gray-100 rounded-lg p-2.5">
+                </section>
+                <section class="bg-white rounded-xl card-shadow p-5 border-t-4 border-green-600">
+                    <h2 class="text-xs font-black text-green-600 mb-4 uppercase">AUTORIZADOR</h2>
+                    <div class="grid grid-cols-2 gap-2 mb-4">
+                        <input type="text" id="ticket-id" required class="border-2 border-gray-100 rounded-lg p-2.5" placeholder="Atendimento">
+                        <input type="text" id="collaborator-name" class="border-2 border-gray-100 rounded-lg p-2.5" placeholder="Colaborador">
+                    </div>
+                    <input type="datetime-local" id="call-time" required class="w-full border-2 border-gray-100 rounded-lg p-2.5">
+                </section>
+            </div>
+            <div class="flex justify-center">
+                <button type="submit" class="bg-unimed text-white font-black py-3 px-12 rounded-full shadow-lg">REGISTRAR NO BANCO</button>
+            </div>
+        </form>
+
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="bg-white p-4 rounded-xl card-shadow text-center">
+                <div class="text-[10px] font-bold text-gray-400 uppercase">Média Espera</div>
+                <div class="text-2xl font-black text-gray-800"><span id="avg-display">0</span> min</div>
+            </div>
+            <div class="bg-white p-4 rounded-xl card-shadow text-center">
+                <div class="text-[10px] font-bold text-gray-400 uppercase">Total Geral</div>
+                <div id="total-display" class="text-2xl font-black text-gray-800">0</div>
+            </div>
+            <div class="bg-white p-4 rounded-xl card-shadow text-center">
+                <div class="text-[10px] font-bold text-gray-400 uppercase">Máxima Hoje</div>
+                <div class="text-2xl font-black text-gray-800"><span id="max-display">0</span> min</div>
+            </div>
+        </section>
+
+        <section class="bg-white rounded-xl card-shadow overflow-hidden">
+            <table class="w-full text-left">
+                <thead class="bg-gray-50 text-[10px] uppercase text-gray-400 font-black">
+                    <tr>
+                        <th class="px-6 py-3">Chamador</th>
+                        <th class="px-6 py-3">Autorizador</th>
+                        <th class="px-6 py-3">Colaborador</th>
+                        <th class="px-6 py-3">Chegada</th>
+                        <th class="px-6 py-3">Autoriz.</th>
+                        <th class="px-6 py-3 text-center">Espera</th>
+                        <th class="px-6 py-3 text-right">Excluir</th>
+                    </tr>
+                </thead>
+                <tbody id="log-body" class="divide-y divide-gray-50 text-sm"></tbody>
+            </table>
+        </section>
+
+        <div class="h-32 opacity-30"><canvas id="mainChart"></canvas></div>
+    </main>
+
+    <script>
+        let chart;
+        
+        function setupInputs() {
+            const now = new Date();
+            const local = new Date(now.getTime() - (now.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+            document.getElementById('token-time').value = local; 
+            document.getElementById('call-time').value = local;  
+        }
+
+        function updateStats() {
+            const currentEntries = window.getEntries();
+            const count = currentEntries.length;
+            document.getElementById('total-display').innerText = count;
+            if (count > 0) {
+                const total = currentEntries.reduce((s, e) => s + e.wait, 0);
+                document.getElementById('avg-display').innerText = Math.round(total / count);
+                document.getElementById('max-display').innerText = Math.max(...currentEntries.map(e => e.wait));
+            }
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('mainChart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: { labels: [], datasets: [{ data: [], borderColor: '#00995d', borderWidth: 2, fill: false, tension: 0.4, pointRadius: 0 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { display: false }, x: { display: false } } }
+            });
+        }
+
+        function updateChart() {
+            const data = window.getEntries().slice(0, 15).reverse();
+            chart.data.labels = data.map((_, i) => i);
+            chart.data.datasets[0].data = data.map(e => e.wait);
+            chart.update();
+        }
+
+        // Funções de Relatório
+        window.openReportModal = () => {
+            const currentEntries = window.getEntries();
+            if (currentEntries.length === 0) return alert("Sem dados.");
+            let txt = "RELATÓRIO UNIMED\n------------------\n";
+            currentEntries.forEach(e => {
+                txt += `Ficha #${e.queue} | Espera: ${e.wait} min | Colab: ${e.colab}\n`;
+            });
+            document.getElementById('report-preview').value = txt;
+            document.getElementById('report-modal').style.display = 'flex';
+        };
+        window.closeReportModal = () => document.getElementById('report-modal').style.display = 'none';
+
+        window.onload = () => {
+            setupInputs();
+            initChart();
+            const lastColab = localStorage.getItem('last_colab_v3');
+            if(lastColab) document.getElementById('collaborator-name').value = lastColab;
+        };
+    </script>
+</body>
+</html>
